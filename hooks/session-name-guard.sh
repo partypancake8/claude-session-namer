@@ -136,6 +136,11 @@ case "${CLAUDE_CODE_ENTRYPOINT:-}" in
   sdk-*|sdk) exit 0 ;;
 esac
 
+# a background job (`claude --bg`) already has a job record of its own, which
+# Claude Code names itself; writing a second one under the session id would
+# only leave a stray record behind.
+[ -n "${CLAUDE_JOB_DIR:-}" ] && exit 0
+
 . "$(dirname "$0")/find_python.sh" 2>/dev/null || PYTHON=python3
 [ -n "$PYTHON" ] || exit 0
 

@@ -34,7 +34,8 @@ open you can tell at a glance which one is `rust-log-parser` and which one is
   subject) and keeps the old color. A resumed session gets its own name and
   color back.
 - **Never blocks.** Every hook fails open and exits 0. Headless runs
-  (`claude -p`, the SDK) and sub-agent turns are never named.
+  (`claude -p`, the SDK), background jobs (`claude --bg`) and sub-agent turns
+  are never named.
 
 ## Requirements
 

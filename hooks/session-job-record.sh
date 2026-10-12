@@ -36,6 +36,9 @@ case "${CLAUDE_CODE_ENTRYPOINT:-}" in
   sdk-*|sdk) exit 0 ;;
 esac
 
+# a background job (`claude --bg`) owns its job record already
+[ -n "${CLAUDE_JOB_DIR:-}" ] && exit 0
+
 . "$(dirname "$0")/find_python.sh" 2>/dev/null || PYTHON=python3
 [ -n "$PYTHON" ] || exit 0
 
