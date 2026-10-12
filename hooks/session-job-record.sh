@@ -36,8 +36,14 @@ case "${CLAUDE_CODE_ENTRYPOINT:-}" in
   sdk-*|sdk) exit 0 ;;
 esac
 
-INPUT="$(cat)"
-SESSION_NAME_GUARD_CHILD=1 python3 - "$INPUT" <<'PY' >/dev/null 2>&1
+. "$(dirname "$0")/find_python.sh" 2>/dev/null || PYTHON=python3
+[ -n "$PYTHON" ] || exit 0
+
+# through a file, not argv: Windows caps a command line at 32767 characters
+INPUT_FILE="$(mktemp 2>/dev/null)" || exit 0
+trap 'rm -f "$INPUT_FILE"' EXIT
+cat > "$INPUT_FILE"
+SESSION_NAME_GUARD_CHILD=1 "$PYTHON" - "$INPUT_FILE" <<'PY' >/dev/null 2>&1
 import json, os, sys, time
 sys.path.insert(0, os.path.join(os.path.expanduser("~"), ".claude", "hooks"))
 import job_record
@@ -47,7 +53,7 @@ STATE_DIR = job_record.STATE_DIR
 
 def read_marker(sid):
     try:
-        with open(os.path.join(STATE_DIR, sid)) as fh:
+        with open(os.path.join(STATE_DIR, sid), encoding="utf-8") as fh:
             d = json.load(fh)
         return d if isinstance(d, dict) else {}
     except Exception:
@@ -65,13 +71,14 @@ def merge_marker(sid, **kw):
     rec["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     path = os.path.join(STATE_DIR, sid)
     tmp = path + ".tmp%d" % os.getpid()
-    with open(tmp, "w") as fh:
+    with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(rec) + "\n")
-    os.replace(tmp, path)
+    job_record.replace_file(tmp, path)
 
 
 try:
-    payload = json.loads(sys.argv[1])
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        payload = json.load(fh)
     sid = payload.get("session_id") or ""
     cwd = payload.get("cwd") or os.getcwd()
     source = payload.get("source") or "startup"

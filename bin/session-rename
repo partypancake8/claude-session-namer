@@ -6,10 +6,15 @@
 # launch session's), which flips the prompt-bar title within a second.
 # With no session argument it renames the session it is running inside.
 # The color is never changed.
-exec python3 - "$@" <<'PY'
+. "$HOME/.claude/hooks/find_python.sh" 2>/dev/null || PYTHON=python3
+exec "${PYTHON:-python3}" - "$@" <<'PY'
 import json, os, re, sys, time, glob
 sys.path.insert(0, os.path.expanduser("~/.claude/hooks"))
 import job_record as jr
+
+def load(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
 
 args = sys.argv[1:]
 if not args or args[0] in ("-h", "--help"):
@@ -24,8 +29,9 @@ def live():
     out = {}
     for p in glob.glob(os.path.join(jr.CLAUDE, "sessions", "*.json")):
         try:
-            pid = int(os.path.basename(p)[:-5]); os.kill(pid, 0)
-            sid = (json.load(open(p)) or {}).get("sessionId")
+            pid = int(os.path.basename(p)[:-5])
+            if not jr.pid_alive(pid): continue
+            sid = (load(p) or {}).get("sessionId")
             if sid: out[sid] = pid
         except Exception:
             continue
@@ -47,7 +53,7 @@ else:
 
 mpath = os.path.join(jr.STATE_DIR, sid)
 try:
-    mk = json.load(open(mpath))
+    mk = load(mpath)
 except Exception:
     mk = {}
 old = mk.get("name") or (jr.read_record(sid) or {}).get("name")
@@ -57,8 +63,10 @@ mk.pop("drift_since", None)
 mk.pop("cleared_from", None)
 os.makedirs(jr.STATE_DIR, exist_ok=True)
 tmp = mpath + ".tmp%d" % os.getpid()
-open(tmp, "w").write(json.dumps(mk) + "\n"); os.replace(tmp, mpath)
-with open(mpath + ".history.jsonl", "a") as fh:
+with open(tmp, "w", encoding="utf-8") as fh:
+    fh.write(json.dumps(mk) + "\n")
+jr.replace_file(tmp, mpath)
+with open(mpath + ".history.jsonl", "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"ts": time.time(), "iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
                          "old": old, "new": name, "reason": "manual rename via session-rename",
                          "prompt_index": None, "source": "shift", "session_id": sid}) + "\n")

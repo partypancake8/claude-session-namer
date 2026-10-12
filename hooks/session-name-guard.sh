@@ -136,9 +136,16 @@ case "${CLAUDE_CODE_ENTRYPOINT:-}" in
   sdk-*|sdk) exit 0 ;;
 esac
 
-INPUT="$(cat)"
+. "$(dirname "$0")/find_python.sh" 2>/dev/null || PYTHON=python3
+[ -n "$PYTHON" ] || exit 0
 
-SESSION_NAME_GUARD_CHILD=1 python3 - "$INPUT" <<'PY'
+# The payload goes through a file, not argv: Windows caps a command line at
+# 32767 characters, and one long pasted prompt would go past that.
+INPUT_FILE="$(mktemp 2>/dev/null)" || exit 0
+trap 'rm -f "$INPUT_FILE"' EXIT
+cat > "$INPUT_FILE"
+
+SESSION_NAME_GUARD_CHILD=1 "$PYTHON" - "$INPUT_FILE" <<'PY'
 import json, os, random, re, subprocess, sys, time, glob
 
 HOME = os.path.expanduser("~")
@@ -180,9 +187,15 @@ COLORS = (job_record.COLORS if job_record else
           ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"])
 
 
+def pid_alive(pid):
+    # job_record knows how to do this on Windows, where os.kill(pid, 0) would
+    # send Ctrl+C instead; without it, treat every pid as gone (fail open)
+    return bool(job_record) and job_record.pid_alive(pid)
+
+
 def log(msg):
     try:
-        with open(LOG, "a") as fh:
+        with open(LOG, "a", encoding="utf-8") as fh:
             fh.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), msg))
     except Exception:
         pass
@@ -199,7 +212,7 @@ def bail(msg=None):
 def read_jsonl(path):
     out = []
     try:
-        with open(path, "r", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -346,12 +359,10 @@ def live_sessions(my_session_id):
             pid = int(os.path.basename(path)[:-5])
         except Exception:
             continue
-        try:
-            os.kill(pid, 0)
-        except Exception:
+        if not pid_alive(pid):
             continue                                  # not a live pid
         try:
-            with open(path) as fh:
+            with open(path, encoding="utf-8") as fh:
                 rec = json.load(fh)
         except Exception:
             continue
@@ -367,8 +378,9 @@ def own_record(my_session_id):
     for path in glob.glob(os.path.join(CLAUDE, "sessions", "*.json")):
         try:
             pid = int(os.path.basename(path)[:-5])
-            os.kill(pid, 0)
-            with open(path) as fh:
+            if not pid_alive(pid):
+                continue
+            with open(path, encoding="utf-8") as fh:
                 rec = json.load(fh)
         except Exception:
             continue
@@ -455,15 +467,19 @@ def haiku(ask, timeout=CHILD_TIMEOUT):
         log("haiku child forced to fail (SESSION_NAME_FORCE_FAIL)")
         return None
     t0 = time.time()
+    claude = job_record.claude_command() if job_record else "claude"
     try:
         proc = subprocess.run(
-            ["claude"] + CHILD_FLAGS + [strip_urls(ask)],
-            capture_output=True, text=True, timeout=timeout, env=env, cwd=HOME,
+            [claude] + CHILD_FLAGS + [strip_urls(ask)],
+            capture_output=True, timeout=timeout, env=env, cwd=HOME,
+            # utf-8, not the locale's code page (cp936, cp1252 ... on Windows)
+            text=True, encoding="utf-8", errors="replace",
             # never inherit stdin: it is this script's own heredoc, and
             # `claude -p` appends whatever it reads from stdin to the prompt
             # (seen 2026-09-24: the guard's source tail rode along and the
             # session was named "session-naming-guard")
             stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except Exception as exc:
         log("haiku child failed: %r" % (exc,))
@@ -954,7 +970,7 @@ def read_marker(session_id):
     if not session_id:
         return {}
     try:
-        with open(marker_file(session_id)) as fh:
+        with open(marker_file(session_id), encoding="utf-8") as fh:
             data = json.load(fh)
         return data if isinstance(data, dict) else {}
     except Exception:
@@ -1028,9 +1044,12 @@ def write_marker(session_id, name=None, color=None, prompt_index=None,
                 eval_ts if eval_ts is not None else time.time())
         rec["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         tmp = marker_file(session_id) + ".tmp%d" % os.getpid()
-        with open(tmp, "w") as fh:
+        with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
-        os.replace(tmp, marker_file(session_id))
+        if job_record:
+            job_record.replace_file(tmp, marker_file(session_id))
+        else:
+            os.replace(tmp, marker_file(session_id))
         return True
     except Exception as exc:
         log("marker write failed: %r" % (exc,))
@@ -1041,7 +1060,7 @@ def append_history(session_id, old, new, reason, prompt_index, source):
     """One line per name CHANGE.  This is what /names prints."""
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
-        with open(history_file(session_id), "a") as fh:
+        with open(history_file(session_id), "a", encoding="utf-8") as fh:
             fh.write(json.dumps({
                 "ts": time.time(),
                 "iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1063,7 +1082,7 @@ def append_focus(session_id, old, new, prompt_index):
     /names table skips it; `/now` and --json readers pick it up."""
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
-        with open(history_file(session_id), "a") as fh:
+        with open(history_file(session_id), "a", encoding="utf-8") as fh:
             fh.write(json.dumps({
                 "ts": time.time(),
                 "iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1173,7 +1192,8 @@ def mirror_to_watcher(session_id, cwd, name, marker, color=None):
 
 def main():
     try:
-        payload = json.loads(sys.argv[1])
+        with open(sys.argv[1], encoding="utf-8") as fh:
+            payload = json.load(fh)
     except Exception:
         bail()
     if not isinstance(payload, dict):
@@ -1395,7 +1415,7 @@ def main():
             % (session_id[:8],))
     elif new_color:
         try:
-            with open(tpath, "a") as fh:
+            with open(tpath, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"type": "agent-color",
                                      "agentColor": new_color,
                                      "sessionId": session_id},

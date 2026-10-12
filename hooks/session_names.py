@@ -38,9 +38,10 @@ rename with its reason.  It backs the `/now` slash command.
 import glob
 import json
 import os
-import subprocess
 import sys
 import time
+
+import job_record           # the process helpers, which differ per platform
 
 HOME = os.path.expanduser("~")
 CLAUDE = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
@@ -63,7 +64,7 @@ SOURCE_LABEL = {
 
 def read_json(path):
     try:
-        with open(path, "r", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             data = json.load(fh)
         return data if isinstance(data, dict) else None
     except Exception:
@@ -72,7 +73,7 @@ def read_json(path):
 
 def iter_jsonl(path):
     try:
-        with open(path, "r", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -133,11 +134,7 @@ def live_records():
         rec = read_json(path)
         if not rec or not rec.get("sessionId"):
             continue
-        alive = True
-        try:
-            os.kill(pid, 0)
-        except Exception:
-            alive = False
+        alive = job_record.pid_alive(pid)
         try:
             mtime = os.path.getmtime(path)
         except Exception:
@@ -145,23 +142,6 @@ def live_records():
         out.append((mtime, pid, rec, alive))
     out.sort(reverse=True)
     return out
-
-
-def ancestor_pids(limit=12):
-    pids = []
-    pid = os.getpid()
-    for _ in range(limit):
-        try:
-            out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
-                                 capture_output=True, text=True, timeout=5)
-            ppid = int((out.stdout or "").strip())
-        except Exception:
-            break
-        if ppid <= 1 or ppid == pid:
-            break
-        pids.append(ppid)
-        pid = ppid
-    return pids
 
 
 def resolve_session_id(arg):
@@ -175,7 +155,7 @@ def resolve_session_id(arg):
 
     recs = live_records()
     by_pid = {pid: rec for (_m, pid, rec, _a) in recs}
-    for pid in ancestor_pids():
+    for pid in job_record.ancestor_pids():
         if pid in by_pid:
             return by_pid[pid].get("sessionId"), "ancestor pid %d" % pid
 
@@ -599,6 +579,12 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    try:
+        # Claude Code reads the output as utf-8; on Windows a pipe would
+        # otherwise get the locale's code page
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     try:
         sys.exit(main(sys.argv[1:]))
     except KeyboardInterrupt:
