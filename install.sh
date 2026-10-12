@@ -377,6 +377,15 @@ for path in targets():
 PY
 }
 
+# name the PowerShell profile files in the messages
+label_profiles() {
+  [ "$RC" = "powershell" ] && [ -n "$PYTHON" ] || return 0
+  local files
+  files="$(rc_edit list 2>/dev/null | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
+  [ -n "$files" ] && RC_LABEL="your PowerShell profile ($files)"
+  return 0
+}
+
 # PowerShell refuses to load a profile under the Restricted (the Windows
 # default on some editions) and AllSigned execution policies.
 ps_policy_note() {
@@ -394,6 +403,7 @@ ps_policy_note() {
 # ------------------------------------------------------------ status
 
 do_status() {
+  label_profiles
   for f in $HOOK_FILES; do
     if [ -f "$HOOKS_DIR/$f" ]; then
       if cmp -s "$REPO/hooks/$f" "$HOOKS_DIR/$f"; then s="installed"; else s="installed, differs from this repo"; fi
@@ -452,6 +462,7 @@ copy_set() {
 
 do_install() {
   need_python
+  label_profiles
   [ "$DRY" = "1" ] && say "== claude-session-namer install (dry run, nothing is written) ==" \
                    || say "== claude-session-namer install =="
 
@@ -526,6 +537,7 @@ do_install() {
 
 do_uninstall() {
   need_python
+  label_profiles
   [ "$DRY" = "1" ] && say "== claude-session-namer uninstall (dry run, nothing is written) ==" \
                    || say "== claude-session-namer uninstall =="
   say "[1/3] hook entries in $SETTINGS"
