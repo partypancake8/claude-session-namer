@@ -533,6 +533,24 @@ GREETING_RE = re.compile(
     r"[\s\W]*$", re.I)
 
 
+# Chinese, Japanese and Korean put no spaces between words
+CJK_RE = re.compile(u"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff"
+                    u"\uac00-\ud7af\uf900-\ufaff]")
+
+
+def word_count(text):
+    """Words in text, in any script.  A run of CJK characters counts as one
+    word per two characters, about what a word is in Chinese."""
+    n = 0
+    for chunk in text.split(" "):
+        cjk = len(CJK_RE.findall(chunk))
+        if cjk:
+            n += (cjk + 1) // 2
+            chunk = CJK_RE.sub(" ", chunk)
+        n += len([w for w in chunk.split() if re.search(r"[^\W_]", w)])
+    return n
+
+
 def first_prompt_worth_naming(text):
     """Cheap local pre-filter for prompt 1.  (worth_it, reason)."""
     t = re.sub(r"\s+", " ", strip_urls(text or "")).strip()
@@ -542,10 +560,10 @@ def first_prompt_worth_naming(text):
         return False, "slash command"
     if GREETING_RE.match(t):
         return False, "bare greeting"
-    words = [w for w in t.split(" ") if re.search(r"[A-Za-z0-9]", w)]
-    if len(words) < FIRST_MIN_WORDS:
-        return False, "only %d words (< %d)" % (len(words), FIRST_MIN_WORDS)
-    return True, "%d words" % len(words)
+    words = word_count(t)
+    if words < FIRST_MIN_WORDS:
+        return False, "only %d words (< %d)" % (words, FIRST_MIN_WORDS)
+    return True, "%d words" % words
 
 
 FIRST_PROMPT_PROMPT = """\
@@ -639,7 +657,9 @@ def sanitize(raw):
     text = (raw or "").strip().splitlines()
     text = text[-1].strip() if text else ""
     text = text.strip().strip('"').strip("'").lower()
-    text = re.sub(r"[^a-z0-9\s-]", " ", text)
+    # letters and digits of any script: a name in the user's own language is
+    # better than none at all
+    text = re.sub(r"[^\w\s-]|_", " ", text)
     words = [w for w in re.split(r"[\s-]+", text) if w]
     if not words:
         return None

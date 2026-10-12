@@ -20,7 +20,7 @@ args = sys.argv[1:]
 if not args or args[0] in ("-h", "--help"):
     print("usage: session-rename <name> [session-id-or-prefix]")
     sys.exit(0 if args else 2)
-words = [w for w in re.split(r"[\s_-]+", re.sub(r"[^a-z0-9\s_-]", " ", args[0].lower())) if w]
+words = [w for w in re.split(r"[\s_-]+", re.sub(r"[^\w\s-]", " ", args[0].lower())) if w]
 name = "-".join(words[:4])[:48]
 if not name:
     sys.exit("session-rename: empty name")
