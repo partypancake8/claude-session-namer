@@ -1,0 +1,72 @@
+#!/bin/bash
+# session-rename <name> [session-id-or-prefix]
+# Rename a live Claude Code session by hand. Writes the name into the naming
+# hook's marker and history (so /names and /now agree), into the session's job
+# record, and into the record its live watcher is on (after /clear that is the
+# launch session's), which flips the prompt-bar title within a second.
+# With no session argument it renames the session it is running inside.
+# The color is never changed.
+exec python3 - "$@" <<'PY'
+import json, os, re, sys, time, glob
+sys.path.insert(0, os.path.expanduser("~/.claude/hooks"))
+import job_record as jr
+
+args = sys.argv[1:]
+if not args or args[0] in ("-h", "--help"):
+    print("usage: session-rename <name> [session-id-or-prefix]")
+    sys.exit(0 if args else 2)
+words = [w for w in re.split(r"[\s_-]+", re.sub(r"[^a-z0-9\s_-]", " ", args[0].lower())) if w]
+name = "-".join(words[:4])[:48]
+if not name:
+    sys.exit("session-rename: empty name")
+
+def live():
+    out = {}
+    for p in glob.glob(os.path.join(jr.CLAUDE, "sessions", "*.json")):
+        try:
+            pid = int(os.path.basename(p)[:-5]); os.kill(pid, 0)
+            sid = (json.load(open(p)) or {}).get("sessionId")
+            if sid: out[sid] = pid
+        except Exception:
+            continue
+    return out
+
+sid = None
+if len(args) > 1:
+    pref = args[1]
+    hits = [s for s in live() if s.startswith(pref)] or \
+           [n for n in os.listdir(jr.STATE_DIR) if n.startswith(pref) and "." not in n]
+    if len(hits) != 1:
+        sys.exit("session-rename: %d sessions match %r" % (len(hits), pref))
+    sid = hits[0]
+else:
+    pid = jr.claude_pid()
+    sid = jr.read_session_file(pid).get("sessionId") if pid else None
+    if not sid:
+        sys.exit("session-rename: not inside a Claude Code session; pass a session id")
+
+mpath = os.path.join(jr.STATE_DIR, sid)
+try:
+    mk = json.load(open(mpath))
+except Exception:
+    mk = {}
+old = mk.get("name") or (jr.read_record(sid) or {}).get("name")
+mk.update({"name": name, "last_rename_reason": "manual rename via session-rename",
+           "last_rename_ts": time.time(), "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+mk.pop("drift_since", None)
+mk.pop("cleared_from", None)
+os.makedirs(jr.STATE_DIR, exist_ok=True)
+tmp = mpath + ".tmp%d" % os.getpid()
+open(tmp, "w").write(json.dumps(mk) + "\n"); os.replace(tmp, mpath)
+with open(mpath + ".history.jsonl", "a") as fh:
+    fh.write(json.dumps({"ts": time.time(), "iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                         "old": old, "new": name, "reason": "manual rename via session-rename",
+                         "prompt_index": None, "source": "shift", "session_id": sid}) + "\n")
+cwd = (jr.read_record(sid) or {}).get("cwd") or os.getcwd()
+jr.apply_name_color(sid, cwd, name=name)
+watch = jr.watched_sid(sid)
+if watch and watch != sid:
+    jr.mirror_name(watch, sid, cwd, name)
+jr.log("manual rename %s %s -> %s (watch=%s)" % (sid[:8], old, name, (watch or "?")[:8]))
+print("renamed %s: %s -> %s" % (sid[:8], old, name))
+PY

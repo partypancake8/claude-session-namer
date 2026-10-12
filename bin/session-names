@@ -1,0 +1,6 @@
+#!/bin/bash
+# session-names [session-id-or-prefix] [--json]
+# Print every name a Claude Code session has been under, with when and why.
+# Backs the /names slash command; with no argument it works out which session
+# it is running inside from its own ancestor pids.
+exec python3 "$HOME/.claude/hooks/session_names.py" "$@"

@@ -1,0 +1,103 @@
+#!/bin/bash
+# cc - launch Claude Code with its job record already on disk.
+#
+# Why this exists: Claude Code watches ~/.claude/jobs/<sessionId[:8]>/state.json
+# and applies {name, color} from that file to the LIVE session (prompt-bar
+# color, prompt-bar badge, terminal title, and the name in
+# ~/.claude/sessions/<pid>.json). The watcher is armed with fs.watch on the job
+# DIRECTORY about half a second into startup, before any SessionStart hook has
+# run, and a missing directory kills the watch for the whole session with no
+# retry. So the directory has to exist before claude starts, which is exactly
+# what this wrapper does before exec'ing the real binary.
+#
+# Use it like `claude`: `cc`, `cc --model opus`, `cc -c`, `cc --resume <id>`.
+# Everything is passed straight through; only a session id is added when there
+# is none, so the record can be named ahead of time.
+#
+# The repo's install.sh wires this in as a zsh function named `claude`,
+# so plain `claude` gets the naming. `command claude` still reaches the binary.
+#
+# Paired with ~/.claude/hooks/session-name-guard.sh, which fills in the name
+# and the color on the second prompt of the session.
+# Disable the whole thing with: touch ~/.claude/session-name-guard-off
+
+set -u
+
+self="$0"
+case "$self" in
+  /*) ;;
+  *) self="$PWD/$self" ;;
+esac
+
+# Resolve the REAL claude binary, never this wrapper and never a shell function
+# (a bash script cannot see the zsh `claude` function, but a PATH collision or a
+# symlink back to this script would still be fatal, so check).
+REAL=""
+for cand in "$(command -v claude 2>/dev/null || true)" \
+            "$HOME/.local/bin/claude" \
+            "/opt/homebrew/bin/claude" \
+            "/usr/local/bin/claude"; do
+  [ -n "$cand" ] || continue
+  [ -x "$cand" ] || continue
+  if [ "$(cd "$(dirname "$cand")" && pwd -P)/$(basename "$cand")" = \
+       "$(cd "$(dirname "$self")" && pwd -P)/$(basename "$self")" ]; then
+    continue                      # that is this script: keep looking
+  fi
+  REAL="$cand"
+  break
+done
+if [ -z "$REAL" ]; then
+  echo "cc: claude is not on PATH" >&2
+  exit 127
+fi
+
+# escape hatch and anything that is not a terminal session: just run claude
+if [ -f "$HOME/.claude/session-name-guard-off" ] || [ ! -t 1 ]; then
+  exec "$REAL" "$@"
+fi
+
+sid=""
+passthrough=0
+resume_seen=0
+prev=""
+for arg in "$@"; do
+  case "$arg" in
+    # headless and informational modes: nothing to name
+    -p|--print|-v|--version|-h|--help) passthrough=1 ;;
+    # modes that pick their own session: never add --session-id
+    -c|--continue|--fork-session|--teleport|--from-pr) passthrough=1 ;;
+    -r|--resume) resume_seen=1; prev="$arg"; continue ;;
+    --session-id) prev="$arg"; continue ;;
+    *)
+      case "$prev" in
+        --session-id|--resume|-r)
+          case "$arg" in
+            [0-9a-fA-F]*-*-*-*-*) sid="$arg" ;;
+          esac
+          ;;
+      esac
+      ;;
+  esac
+  prev="$arg"
+done
+
+# a bare -r / --resume (the interactive picker) owns the session id: pass through
+if [ "$resume_seen" = "1" ] && [ -z "$sid" ]; then
+  exec "$REAL" "$@"
+fi
+
+if [ "$passthrough" = "1" ] && [ -z "$sid" ]; then
+  exec "$REAL" "$@"
+fi
+
+if [ -z "$sid" ]; then
+  sid="$(python3 -c 'import uuid;print(uuid.uuid4())' 2>/dev/null)"
+  [ -z "$sid" ] && exec "$REAL" "$@"
+  python3 "$HOME/.claude/hooks/job_record.py" ensure "$sid" "$PWD" --prelaunch >/dev/null 2>&1
+  python3 "$HOME/.claude/hooks/job_record.py" prune >/dev/null 2>&1 &
+  exec "$REAL" --session-id "$sid" "$@"
+fi
+
+# a session id was given on the command line: just make sure its record exists
+python3 "$HOME/.claude/hooks/job_record.py" ensure "$sid" "$PWD" --prelaunch >/dev/null 2>&1
+exec "$REAL" "$@"

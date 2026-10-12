@@ -1,0 +1,8 @@
+#!/bin/bash
+# session-now [session-id-or-prefix] [--json]
+# Print what this Claude Code session is working on right now: its name, color,
+# the one-sentence focus line the naming hook stores on every evaluation, how
+# long ago that was set, how many prompts ago, and the last rename with its
+# reason. Backs the /now slash command; with no argument it works out which
+# session it is running inside from its own ancestor pids.
+exec python3 "$HOME/.claude/hooks/session_names.py" --now "$@"
