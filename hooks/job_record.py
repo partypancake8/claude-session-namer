@@ -25,6 +25,10 @@ sometimes, and always in time for /color, `claude agents` and the next resume).
 The record is written with state "done" on purpose: `claude agents` hides
 completed background rows unless --all is passed, so a live terminal session
 does not turn into a fake background job in the agent view.
+
+This module also holds the few process helpers that differ per platform
+(pid_alive, parent_pid, process_argv, claude_command), so the hooks and the
+bin/ scripts run on macOS, Linux and native Windows alike.
 """
 import json
 import os
@@ -37,6 +41,7 @@ JOBS = os.path.join(CLAUDE, "jobs")
 LOG = os.path.join(CLAUDE, "session-name-guard.log")
 MARKER = ".name-guard"
 OFF = os.path.join(CLAUDE, "session-name-guard-off")
+IS_WINDOWS = os.name == "nt"
 
 # the colors Claude Code accepts for an agent/prompt-bar color
 COLORS = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"]
@@ -44,10 +49,264 @@ COLORS = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"]
 
 def log(msg):
     try:
-        with open(LOG, "a") as fh:
+        with open(LOG, "a", encoding="utf-8") as fh:
             fh.write("%s job-record %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), msg))
     except Exception:
         pass
+
+
+# ------------------------------------------------------------ processes
+#
+# Never call os.kill(pid, 0) to test a pid: on Windows signal 0 is
+# CTRL_C_EVENT, so it sends Ctrl+C to the process group instead of probing it.
+
+def _kernel32():
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE,
+                                       ctypes.POINTER(wintypes.DWORD)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    return k32
+
+
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def pid_alive(pid):
+    """True when a process with this pid exists."""
+    try:
+        pid = int(pid)
+    except Exception:
+        return False
+    if pid <= 0:
+        return False
+    if not IS_WINDOWS:
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            return True                   # alive, owned by someone else
+        except Exception:
+            return False
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = _kernel32()
+        h = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            return ctypes.get_last_error() == 5     # access denied: it exists
+        try:
+            code = wintypes.DWORD()
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return True
+            return code.value == 259                # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return False
+
+
+def _windows_parents():
+    """{pid: parent pid} for every process, from one Toolhelp snapshot."""
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    k32 = _kernel32()
+    for fn in (k32.Process32FirstW, k32.Process32NextW):
+        fn.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        fn.restype = wintypes.BOOL
+    snap = k32.CreateToolhelp32Snapshot(0x2, 0)          # TH32CS_SNAPPROCESS
+    if not snap or snap == wintypes.HANDLE(-1).value:
+        return {}
+    out = {}
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        ok = k32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            out[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            ok = k32.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        k32.CloseHandle(snap)
+    return out
+
+
+def parent_pid(pid):
+    """The parent pid of pid, or None."""
+    if IS_WINDOWS:
+        try:
+            ppid = _windows_parents().get(int(pid))
+        except Exception:
+            return None
+        return ppid or None
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-o", "ppid=", "-p", str(int(pid))],
+                             capture_output=True, text=True, timeout=5)
+        return int((out.stdout or "").strip())
+    except Exception:
+        return None
+
+
+def ancestor_pids(limit=12):
+    """This process's ancestors, nearest first."""
+    if IS_WINDOWS:
+        try:
+            parents = _windows_parents()
+        except Exception:
+            return []
+        get = parents.get
+    else:
+        get = parent_pid
+    pids = []
+    pid = os.getpid()
+    for _ in range(limit):
+        ppid = get(pid)
+        if not ppid or ppid <= 1 or ppid == pid or ppid in pids:
+            break
+        pids.append(ppid)
+        pid = ppid
+    return pids
+
+
+def _windows_command_line(pid):
+    """The command line of a Windows process, read with
+    NtQueryInformationProcess(ProcessCommandLineInformation), or None."""
+    import ctypes
+    from ctypes import wintypes
+
+    class UNICODE_STRING(ctypes.Structure):
+        _fields_ = [("Length", ctypes.c_ushort),
+                    ("MaximumLength", ctypes.c_ushort),
+                    ("Buffer", ctypes.c_void_p)]
+
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtQueryInformationProcess.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.ULONG,
+        ctypes.POINTER(wintypes.ULONG)]
+    ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+    k32 = _kernel32()
+    h = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not h:
+        return None
+    try:
+        size = wintypes.ULONG(0)
+        ntdll.NtQueryInformationProcess(h, 60, None, 0, ctypes.byref(size))
+        if not size.value:
+            return None
+        buf = ctypes.create_string_buffer(size.value)
+        status = ntdll.NtQueryInformationProcess(h, 60, buf, size,
+                                                 ctypes.byref(size))
+        if status != 0:
+            return None
+        us = UNICODE_STRING.from_buffer(buf)
+        if not us.Buffer:
+            return None
+        return ctypes.wstring_at(us.Buffer, us.Length // 2)
+    finally:
+        k32.CloseHandle(h)
+
+
+def process_argv(pid):
+    """The argument list of a live process, or []."""
+    if not pid:
+        return []
+    if not IS_WINDOWS:
+        import subprocess
+        try:
+            out = subprocess.run(["ps", "-o", "command=", "-p", str(int(pid))],
+                                 capture_output=True, text=True, timeout=5)
+            return (out.stdout or "").split()
+        except Exception:
+            return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+        line = _windows_command_line(pid)
+        if not line:
+            return []
+        shell32 = ctypes.WinDLL("shell32")
+        shell32.CommandLineToArgvW.argtypes = [wintypes.LPCWSTR,
+                                               ctypes.POINTER(ctypes.c_int)]
+        shell32.CommandLineToArgvW.restype = ctypes.POINTER(wintypes.LPWSTR)
+        argc = ctypes.c_int(0)
+        argv = shell32.CommandLineToArgvW(line, ctypes.byref(argc))
+        if not argv:
+            return line.split()
+        try:
+            return [argv[i] for i in range(argc.value)]
+        finally:
+            k32 = _kernel32()
+            k32.LocalFree.argtypes = [ctypes.c_void_p]
+            k32.LocalFree(ctypes.cast(argv, ctypes.c_void_p))
+    except Exception:
+        return []
+
+
+def claude_command():
+    """argv[0] for running Claude Code headless from a hook.
+
+    On Windows, subprocess only finds .exe files on PATH, and an npm install
+    puts a claude.cmd shim there. Running the shim would push the prompt
+    through cmd.exe quoting, so find the claude.exe it points at instead.
+    $SESSION_NAME_CLAUDE overrides all of this.
+    """
+    override = (os.environ.get("SESSION_NAME_CLAUDE") or "").strip()
+    if override:
+        return override
+    if not IS_WINDOWS:
+        return "claude"
+    import re
+    import shutil
+    exe = shutil.which("claude.exe")
+    if exe:
+        return exe
+    shim = shutil.which("claude")
+    if shim and shim.lower().endswith((".cmd", ".bat")):
+        try:
+            with open(shim, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except Exception:
+            text = ""
+        m = re.search(r'"%dp0%\\?([^"%]+?\.exe)"', text, re.I)
+        if m:
+            cand = os.path.join(os.path.dirname(shim), m.group(1))
+            if os.path.isfile(cand):
+                return cand
+    cand = os.path.join(HOME, ".local", "bin", "claude.exe")
+    if os.path.isfile(cand):
+        return cand
+    return shim or "claude"
+
+
+def replace_file(tmp, path):
+    """os.replace, retried briefly: on Windows it fails while another process
+    (Claude Code reading the record, say) has the target open."""
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 def disabled():
@@ -64,7 +323,7 @@ def state_path(session_id):
 
 def read_record(session_id):
     try:
-        with open(state_path(session_id)) as fh:
+        with open(state_path(session_id), encoding="utf-8") as fh:
             rec = json.load(fh)
         return rec if isinstance(rec, dict) else None
     except Exception:
@@ -128,10 +387,10 @@ def write_record(session_id, rec):
         if not os.path.exists(marker):
             open(marker, "w").close()
         tmp = os.path.join(d, ".state.json.tmp%d" % os.getpid())
-        with open(tmp, "w") as fh:
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(rec, fh, indent=2)
         os.chmod(tmp, 0o600)
-        os.replace(tmp, os.path.join(d, "state.json"))
+        replace_file(tmp, os.path.join(d, "state.json"))
         return True
     except Exception as exc:
         log("write failed for %s: %r" % (session_id[:8], exc))
@@ -209,7 +468,7 @@ def session_file(pid):
 
 def read_session_file(pid):
     try:
-        with open(session_file(pid)) as fh:
+        with open(session_file(pid), encoding="utf-8") as fh:
             rec = json.load(fh)
         return rec if isinstance(rec, dict) else {}
     except Exception:
@@ -221,17 +480,7 @@ def claude_pid():
 
     Walks up the parent chain until a pid with ~/.claude/sessions/<pid>.json.
     """
-    import subprocess
-    pid = os.getpid()
-    for _ in range(8):
-        try:
-            out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
-                                 capture_output=True, text=True, timeout=5)
-            pid = int((out.stdout or "").strip())
-        except Exception:
-            return None
-        if pid <= 1:
-            return None
+    for pid in ancestor_pids(8):
         if os.path.exists(session_file(pid)):
             return pid
     return None
@@ -243,8 +492,9 @@ def pid_for_session(session_id):
     for path in glob.glob(os.path.join(CLAUDE, "sessions", "*.json")):
         try:
             pid = int(os.path.basename(path)[:-5])
-            os.kill(pid, 0)
-            with open(path) as fh:
+            if not pid_alive(pid):
+                continue
+            with open(path, encoding="utf-8") as fh:
                 if (json.load(fh) or {}).get("sessionId") == session_id:
                     return pid
         except Exception:
@@ -261,7 +511,7 @@ def read_pidmap(pid):
     if not pid:
         return {}
     try:
-        with open(pidmap_path(pid)) as fh:
+        with open(pidmap_path(pid), encoding="utf-8") as fh:
             pm = json.load(fh)
     except Exception:
         return {}
@@ -290,9 +540,9 @@ def write_pidmap(pid, **kw):
             pm["procStart"] = ps
         pm["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         tmp = pidmap_path(pid) + ".tmp%d" % os.getpid()
-        with open(tmp, "w") as fh:
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(pm, fh)
-        os.replace(tmp, pidmap_path(pid))
+        replace_file(tmp, pidmap_path(pid))
         return True
     except Exception as exc:
         log("pidmap write failed for %s: %r" % (pid, exc))
@@ -309,15 +559,9 @@ def launch_sid(pid):
     recovers watch_sid for a process that started before the pid map existed
     (added 2026-09-24).  ~/bin/cc always passes --session-id."""
     import re
-    import subprocess
     if not pid:
         return None
-    try:
-        out = subprocess.run(["ps", "-o", "command=", "-p", str(int(pid))],
-                             capture_output=True, text=True, timeout=5)
-        argv = (out.stdout or "").split()
-    except Exception:
-        return None
+    argv = process_argv(pid)
     if "--fork-session" in argv:
         return None
     for i, a in enumerate(argv[:-1]):
@@ -402,9 +646,8 @@ def prune(max_age_days=7, live_session_ids=(), named_max_age_days=60):
             if not (n.startswith("pid-") and n.endswith(".json")):
                 continue
             try:
-                os.kill(int(n[4:-5]), 0)
-            except ProcessLookupError:
-                os.remove(os.path.join(STATE_DIR, n))
+                if not pid_alive(int(n[4:-5])):
+                    os.remove(os.path.join(STATE_DIR, n))
             except Exception:
                 continue
     except Exception:
@@ -448,8 +691,10 @@ def _cli(argv):
         for p in glob.glob(os.path.join(CLAUDE, "sessions", "*.json")):
             try:
                 pid = int(os.path.basename(p)[:-5])
-                os.kill(pid, 0)
-                live.append((json.load(open(p)) or {}).get("sessionId") or "")
+                if not pid_alive(pid):
+                    continue
+                with open(p, encoding="utf-8") as fh:
+                    live.append((json.load(fh) or {}).get("sessionId") or "")
             except Exception:
                 continue
         print(prune(live_session_ids=live))

@@ -3,4 +3,5 @@
 # Print every name a Claude Code session has been under, with when and why.
 # Backs the /names slash command; with no argument it works out which session
 # it is running inside from its own ancestor pids.
-exec python3 "$HOME/.claude/hooks/session_names.py" "$@"
+. "$HOME/.claude/hooks/find_python.sh" 2>/dev/null || PYTHON=python3
+exec "${PYTHON:-python3}" "$HOME/.claude/hooks/session_names.py" "$@"

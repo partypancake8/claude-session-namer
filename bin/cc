@@ -56,6 +56,9 @@ if [ -f "$HOME/.claude/session-name-guard-off" ] || [ ! -t 1 ]; then
   exec "$REAL" "$@"
 fi
 
+. "$HOME/.claude/hooks/find_python.sh" 2>/dev/null || PYTHON=python3
+[ -n "$PYTHON" ] || exec "$REAL" "$@"
+
 sid=""
 passthrough=0
 resume_seen=0
@@ -91,13 +94,14 @@ if [ "$passthrough" = "1" ] && [ -z "$sid" ]; then
 fi
 
 if [ -z "$sid" ]; then
-  sid="$(python3 -c 'import uuid;print(uuid.uuid4())' 2>/dev/null)"
+  # end="": a Windows python would print \r\n, and $(...) keeps the \r
+  sid="$("$PYTHON" -c 'import uuid;print(uuid.uuid4(), end="")' 2>/dev/null)"
   [ -z "$sid" ] && exec "$REAL" "$@"
-  python3 "$HOME/.claude/hooks/job_record.py" ensure "$sid" "$PWD" --prelaunch >/dev/null 2>&1
-  python3 "$HOME/.claude/hooks/job_record.py" prune >/dev/null 2>&1 &
+  "$PYTHON" "$HOME/.claude/hooks/job_record.py" ensure "$sid" "$PWD" --prelaunch >/dev/null 2>&1
+  "$PYTHON" "$HOME/.claude/hooks/job_record.py" prune >/dev/null 2>&1 &
   exec "$REAL" --session-id "$sid" "$@"
 fi
 
 # a session id was given on the command line: just make sure its record exists
-python3 "$HOME/.claude/hooks/job_record.py" ensure "$sid" "$PWD" --prelaunch >/dev/null 2>&1
+"$PYTHON" "$HOME/.claude/hooks/job_record.py" ensure "$sid" "$PWD" --prelaunch >/dev/null 2>&1
 exec "$REAL" "$@"

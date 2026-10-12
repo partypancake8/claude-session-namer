@@ -34,19 +34,23 @@ open you can tell at a glance which one is `rust-log-parser` and which one is
   subject) and keeps the old color. A resumed session gets its own name and
   color back.
 - **Never blocks.** Every hook fails open and exits 0. Headless runs
-  (`claude -p`, the SDK) and sub-agent turns are never named.
+  (`claude -p`, the SDK), background jobs (`claude --bg`) and sub-agent turns
+  are never named.
 
 ## Requirements
 
-- macOS (it uses `ps` and the Claude Code session files under `~/.claude`).
-  Linux may work but is untested.
-- Claude Code 2.1.28x. It was built and tested against 2.1.274 through 2.1.282.
-- `python3` on PATH.
+- macOS, or Windows 10/11 (native, not WSL). Linux may work but is untested.
+- Claude Code 2.1.28x. It was built and tested against 2.1.274 through 2.1.282
+  on macOS, and 2.1.296 on Windows.
+- Python 3 on PATH: `python3`, or on Windows `python`, `python3` or `py`.
 - `claude` on PATH, logged in. The naming hook shells out to `claude -p
   --model haiku` for each naming decision, so it uses your normal Claude Code
   login and counts against it. Each call is tiny: no tools, one turn, no
   thinking budget, no settings or hooks inherited.
-- zsh, if you want plain `claude` to go through the launcher (optional).
+- On Windows, Git for Windows. Claude Code runs hooks in its Git Bash, and the
+  installer runs there too.
+- zsh (or PowerShell on Windows), if you want plain `claude` to go through the
+  launcher (optional).
 
 ## Install
 
@@ -75,6 +79,23 @@ The installer:
    ```
 
    `command claude` still reaches the real binary.
+
+### On Windows
+
+Run the same commands in Git Bash. The installer also copies `bin/cc.ps1`,
+the PowerShell launcher, and step 5 offers this block for your PowerShell
+profile instead (Windows PowerShell, and PowerShell 7 when it is installed):
+
+```powershell
+# >>> claude-session-namer >>>
+function claude { & "$HOME\bin\cc.ps1" @args }
+# <<< claude-session-namer <<<
+```
+
+`claude.exe` still reaches the real binary. PowerShell only loads a profile
+when its execution policy allows local scripts; if yours is `Restricted`, run
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once. Git Bash puts
+`~/bin` on its PATH, which is all `/names` and `/now` need.
 
 Other modes:
 
@@ -131,6 +152,8 @@ shell or in the `env` block of `~/.claude/settings.json`.
 | `SESSION_NAME_BREAK_MIN` | `20` | after a break this many minutes long, check the topic after only 2 prompts |
 | `SESSION_NAME_DRIFT_PROMPTS` | `12` | prompts of sustained drift before the drift override renames. `0` turns it off |
 | `SESSION_NAME_FORCE_FAIL` | unset | `1` makes the Haiku call fail, for testing the retry path |
+| `SESSION_NAME_PYTHON` | found on PATH | the Python 3 command the hooks and scripts run |
+| `SESSION_NAME_CLAUDE` | `claude` (on Windows, the `claude.exe` behind an npm `claude.cmd`) | the Claude Code binary the hook runs for each naming decision |
 
 Escape hatch: `touch ~/.claude/session-name-guard-off` turns off everything
 (both hooks and the launcher's record) until you delete the file.
@@ -153,8 +176,8 @@ the watch fails once and is never retried for the life of the process. And it
 arms before any SessionStart hook runs. Measured on one machine, a SessionStart
 hook won that race about 2 times in 6.
 
-So `bin/cc` generates the session id itself, creates the job record, and then
-execs the real `claude` with `--session-id`. The directory always exists in
+So `bin/cc` (`bin/cc.ps1` on Windows) generates the session id itself,
+creates the job record, and then execs the real `claude` with `--session-id`. The directory always exists in
 time. The SessionStart hook still creates the record as a backstop, which
 covers `/color`, `claude agents` and the next resume.
 
