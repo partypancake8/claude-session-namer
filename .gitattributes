@@ -1,0 +1,4 @@
+# Keep LF line endings everywhere. Git for Windows defaults to
+# core.autocrlf=true, and a CRLF checkout breaks every bash script here
+# ($'\r': command not found), install.sh included.
+* text=auto eol=lf
